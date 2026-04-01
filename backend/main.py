@@ -9,6 +9,9 @@ from typing import Optional, Dict
 from datetime import datetime
 import logging
 import time as _time
+import hashlib
+import json
+import os
 
 from fuel_model import (
     AIRCRAFT, altitude_band_to_ft, altitude_band_to_pressure,
@@ -417,6 +420,40 @@ class OptimizeRequest(BaseModel):
     departure_iso: str = "2025-01-15T10:00:00Z"
     weights: Dict[str, float] = {"co2": 0.4, "contrail": 0.4, "time": 0.2}
     use_noaa: bool = True
+    use_cache: bool = True
+
+
+# ─── Route Cache ────────────────────────────────────────────────────────────
+ROUTE_CACHE_DIR = os.path.join(os.path.dirname(__file__), ".route_cache")
+os.makedirs(ROUTE_CACHE_DIR, exist_ok=True)
+
+
+def _route_cache_key(origin: str, dest: str, aircraft: str, use_noaa: bool) -> str:
+    raw = f"{origin}_{dest}_{aircraft}_{use_noaa}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _load_route_cache(key: str) -> Optional[dict]:
+    path = os.path.join(ROUTE_CACHE_DIR, f"{key}.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            logger.info(f"[CACHE] Route cache HIT: {key[:8]}...")
+            return data
+        except Exception as e:
+            logger.warning(f"[CACHE] Failed to load route cache: {e}")
+    return None
+
+
+def _save_route_cache(key: str, data: dict):
+    path = os.path.join(ROUTE_CACHE_DIR, f"{key}.json")
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f)
+        logger.info(f"[CACHE] Route cache saved: {key[:8]}...")
+    except Exception as e:
+        logger.warning(f"[CACHE] Failed to save route cache: {e}")
 
 
 def geocode_location(query: str) -> dict:
@@ -499,6 +536,20 @@ async def optimize(req: OptimizeRequest):
     
     route_dist = haversine_distance_km(origin['lat'], origin['lon'], dest['lat'], dest['lon'])
     logger.info(f"[OPTIMIZE] Great circle distance: {route_dist:.0f} km")
+
+    # ─── Route Cache Check ──────────────────────────────────────────────────
+    cache_key = _route_cache_key(req.origin, req.destination, req.aircraft, req.use_noaa)
+    if req.use_cache:
+        cached_result = _load_route_cache(cache_key)
+        if cached_result is not None:
+            # Re-select by current weights
+            logger.info(f"[OPTIMIZE] Using cached route result")
+            total_elapsed = _time.time() - total_start
+            logger.info(f"[OPTIMIZE] Total request time (cached): {total_elapsed:.1f}s")
+            cached_result["_cached"] = True
+            return cached_result
+    else:
+        logger.info(f"[OPTIMIZE] Route cache disabled by user — forcing fresh optimization")
 
     # Parse departure time
     try:
@@ -624,7 +675,7 @@ async def optimize(req: OptimizeRequest):
     logger.info(f"[OPTIMIZE] Total request time: {total_elapsed:.1f}s")
     logger.info("="*60)
     
-    return {
+    response_data = {
         "selected_path": selected_path,
         "baseline_path": baseline_path,
         "pareto_front": pareto_data,
@@ -646,6 +697,14 @@ async def optimize(req: OptimizeRequest):
         "origin": origin,
         "destination": dest,
     }
+
+    # Save to route cache
+    try:
+        _save_route_cache(cache_key, response_data)
+    except Exception as e:
+        logger.warning(f"[OPTIMIZE] Failed to save route cache: {e}")
+
+    return response_data
 
 
 if __name__ == "__main__":

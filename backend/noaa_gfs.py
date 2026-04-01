@@ -1,6 +1,13 @@
 """
 NOAA GFS atmospheric data integration for GreenPath.
-Fetches real GFS data via OPeNDAP or HTTP, falls back to synthetic atmosphere.
+Fetches real GFS data via NOMADS GRIB Filter, OPeNDAP, or AWS S3.
+Falls back to synthetic atmosphere when all sources fail.
+
+Data sources (in priority order):
+  1. NOMADS GRIB Filter — most reliable, subsets via HTTP
+  2. NOMADS OPeNDAP — direct xarray access
+  3. AWS S3 (noaa-gfs-bdp-pds) — cloud-hosted GRIB2 files
+  4. Synthetic fallback — US Standard Atmosphere with ISSR patches
 """
 import numpy as np
 from datetime import datetime, timedelta
@@ -8,6 +15,8 @@ import hashlib
 import os
 import logging
 import time as _time
+import struct
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +64,7 @@ def fetch_gfs_data(
 ) -> dict:
     """
     Fetch atmospheric data for the flight corridor.
-    If use_noaa=True, tries NOAA GFS first, falls back to synthetic.
-    If use_noaa=False, uses synthetic data directly.
+    Tries multiple NOAA sources, falls back to synthetic.
     """
     logger.info(f"[GFS] Fetching atmosphere for ({origin_lat:.1f},{origin_lon:.1f}) → ({dest_lat:.1f},{dest_lon:.1f})")
     logger.info(f"[GFS] Departure: {departure_time.isoformat()}, NOAA enabled: {use_noaa}")
@@ -86,39 +94,245 @@ def fetch_gfs_data(
 
     # Try NOAA GFS if enabled
     if use_noaa:
+        # Method 1: NOMADS GRIB Filter (most reliable)
+        logger.info("[GFS] Attempting NOAA NOMADS GRIB Filter fetch...")
+        start_t = _time.time()
+        try:
+            data = _fetch_nomads_filter(date_str, hour, bbox)
+            if data is not None:
+                elapsed = _time.time() - start_t
+                logger.info(f"[GFS] ✓ NOMADS GRIB Filter data fetched in {elapsed:.1f}s")
+                _save_cache(key, data)
+                return data
+        except Exception as e:
+            elapsed = _time.time() - start_t
+            logger.warning(f"[GFS] ✗ NOMADS GRIB Filter failed in {elapsed:.1f}s: {e}")
+
+        # Method 2: OPeNDAP
         logger.info("[GFS] Attempting NOAA GFS OPeNDAP fetch...")
         start_t = _time.time()
         try:
             data = _fetch_noaa_gfs(date_str, hour, bbox)
             if data is not None:
                 elapsed = _time.time() - start_t
-                logger.info(f"[GFS] ✓ NOAA GFS data fetched in {elapsed:.1f}s")
+                logger.info(f"[GFS] ✓ NOAA GFS OPeNDAP data fetched in {elapsed:.1f}s")
                 _save_cache(key, data)
                 return data
         except Exception as e:
             elapsed = _time.time() - start_t
-            logger.warning(f"[GFS] ✗ NOAA GFS failed in {elapsed:.1f}s: {e}")
+            logger.warning(f"[GFS] ✗ NOAA GFS OPeNDAP failed in {elapsed:.1f}s: {e}")
 
-        # Try HTTP fallback for recent data
-        logger.info("[GFS] Trying NOAA HTTP fallback...")
+        # Method 3: AWS S3 cloud access
+        logger.info("[GFS] Attempting AWS S3 cloud fetch...")
+        start_t = _time.time()
         try:
-            data = _fetch_noaa_http(date_str, hour, bbox)
+            data = _fetch_aws_s3(date_str, hour, bbox)
             if data is not None:
-                logger.info("[GFS] ✓ NOAA HTTP data fetched successfully")
+                elapsed = _time.time() - start_t
+                logger.info(f"[GFS] ✓ AWS S3 data fetched in {elapsed:.1f}s")
                 _save_cache(key, data)
                 return data
         except Exception as e:
-            logger.warning(f"[GFS] ✗ NOAA HTTP fallback failed: {e}")
+            elapsed = _time.time() - start_t
+            logger.warning(f"[GFS] ✗ AWS S3 fetch failed in {elapsed:.1f}s: {e}")
     else:
         logger.info("[GFS] NOAA disabled by user, using synthetic data")
 
     # Fall back to synthetic
-    logger.info("[GFS] Generating synthetic atmospheric data...")
+    logger.info("[GFS] All NOAA sources failed. Generating synthetic atmospheric data...")
     data = generate_synthetic_atmosphere(
         origin_lat, origin_lon, dest_lat, dest_lon, departure_time
     )
     logger.info("[GFS] ✓ Synthetic data generated")
     return data
+
+
+def _fetch_nomads_filter(date_str: str, hour: int, bbox: tuple) -> dict:
+    """
+    Fetch GFS data via NOMADS GRIB Filter service.
+    This is NOAA's recommended approach (replacing deprecated OPeNDAP).
+    Downloads a small subset of variables/levels/region as GRIB2.
+    """
+    try:
+        import requests
+    except ImportError:
+        logger.warning("[GFS] requests not installed")
+        return None
+
+    min_lat, max_lat, min_lon, max_lon = bbox
+
+    # Variables we need for contrail detection
+    variables = ["TMP", "RH", "UGRD", "VGRD"]
+    # Pressure levels for upper atmosphere (flight levels)
+    levels = ["200_mb", "250_mb", "300_mb", "350_mb", "400_mb", "450_mb", "500_mb"]
+
+    for day_offset in [0, -1, -2]:
+        try:
+            from datetime import datetime as dt
+            base_date = dt.strptime(date_str, "%Y%m%d") + timedelta(days=day_offset)
+            attempt_date = base_date.strftime("%Y%m%d")
+
+            file_name = f"gfs.t{hour:02d}z.pgrb2.0p25.f000"
+            dir_path = f"%2Fgfs.{attempt_date}%2F{hour:02d}%2Fatmos"
+
+            # Build URL with parameters
+            url = f"https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?"
+            url += f"file={file_name}"
+            for lev in levels:
+                url += f"&lev_{lev}=on"
+            for var in variables:
+                url += f"&var_{var}=on"
+            url += f"&subregion="
+            url += f"&leftlon={min_lon}"
+            url += f"&rightlon={max_lon}"
+            url += f"&toplat={max_lat}"
+            url += f"&bottomlat={min_lat}"
+            url += f"&dir={dir_path}"
+
+            logger.info(f"[GFS] NOMADS Filter: attempting {attempt_date}/{hour:02d}z")
+
+            resp = requests.get(url, timeout=45)
+            if resp.status_code != 200:
+                logger.info(f"[GFS] NOMADS Filter: HTTP {resp.status_code} for {attempt_date}")
+                continue
+
+            if len(resp.content) < 500:
+                logger.info(f"[GFS] NOMADS Filter: response too small ({len(resp.content)} bytes)")
+                continue
+
+            # Try to parse with cfgrib via xarray
+            data = _parse_grib_response(resp.content, bbox, attempt_date, hour)
+            if data is not None:
+                return data
+
+        except Exception as e:
+            logger.info(f"[GFS] NOMADS Filter attempt for offset {day_offset} failed: {e}")
+            continue
+
+    return None
+
+
+def _parse_grib_response(content: bytes, bbox: tuple, date_str: str, hour: int) -> dict:
+    """Parse GRIB2 response using cfgrib/xarray or manual extraction."""
+    min_lat, max_lat, min_lon, max_lon = bbox
+
+    # Try cfgrib first
+    try:
+        import xarray as xr
+        import tempfile
+        
+        with tempfile.NamedTemporaryFile(suffix='.grib2', delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            # Open all datasets from GRIB (different variables may be in different messages)
+            datasets = xr.open_datasets(tmp_path, engine='cfgrib',
+                                        backend_kwargs={'indexpath': ''})
+            
+            if not datasets:
+                datasets = [xr.open_dataset(tmp_path, engine='cfgrib',
+                                            backend_kwargs={'indexpath': ''})]
+
+            # Merge all datasets
+            ds = xr.merge(datasets, compat='override')
+
+            lats = ds.latitude.values
+            lons = ds.longitude.values
+            # Convert 0-360 to -180..180
+            lons = np.where(lons > 180, lons - 360, lons)
+
+            temp_data = []
+            rh_data = []
+            u_data = []
+            v_data = []
+
+            # Detect variable names (GFS uses various naming)
+            temp_var = None
+            for name in ['t', 'TMP', 'tmp', 'temperature']:
+                if name in ds:
+                    temp_var = name
+                    break
+
+            rh_var = None
+            for name in ['r', 'RH', 'rh', 'relative_humidity']:
+                if name in ds:
+                    rh_var = name
+                    break
+
+            u_var = None
+            for name in ['u', 'UGRD', 'ugrd', 'u-component_of_wind']:
+                if name in ds:
+                    u_var = name
+                    break
+
+            v_var = None
+            for name in ['v', 'VGRD', 'vgrd', 'v-component_of_wind']:
+                if name in ds:
+                    v_var = name
+                    break
+
+            if not all([temp_var, rh_var, u_var, v_var]):
+                logger.warning(f"[GFS] Missing variables in GRIB: available={list(ds.data_vars)}")
+                return None
+
+            # Check for pressure level dimension
+            level_dim = None
+            for dim in ['isobaricInhPa', 'level', 'lev', 'pressure']:
+                if dim in ds.dims or dim in ds.coords:
+                    level_dim = dim
+                    break
+
+            for p_level in PRESSURE_LEVELS:
+                if level_dim:
+                    level_data = ds.sel({level_dim: p_level}, method='nearest')
+                else:
+                    level_data = ds
+
+                temp_data.append(level_data[temp_var].values)
+                rh_data.append(level_data[rh_var].values)
+                u_data.append(level_data[u_var].values)
+                v_data.append(level_data[v_var].values)
+
+            ds.close()
+
+            from sac_engine import saturation_pressure_water, saturation_pressure_ice
+
+            temp_arr = np.array(temp_data)
+            rh_arr = np.array(rh_data)
+
+            e_w = saturation_pressure_water(temp_arr)
+            e_i = saturation_pressure_ice(temp_arr)
+            safe_e_i = np.where(e_i > 0, e_i, 1.0)
+            rhi = rh_arr * (e_w / safe_e_i)
+            issr_intensity = np.maximum(0.0, rhi - 100.0)
+
+            logger.info(f"[GFS] GRIB parsed: temp={temp_arr.shape}, ISSR max={issr_intensity.max():.1f}")
+
+            return {
+                "lats": lats,
+                "lons": lons,
+                "pressure_levels": np.array(PRESSURE_LEVELS),
+                "temperature": temp_arr,
+                "rh": rh_arr,
+                "u_wind": np.array(u_data),
+                "v_wind": np.array(v_data),
+                "issr_intensity": issr_intensity,
+                "source": np.array(["noaa_live"]),
+                "timestamp": np.array([f"{date_str}T{hour:02d}:00:00Z"]),
+            }
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    except ImportError:
+        logger.info("[GFS] cfgrib not available, skipping GRIB parse")
+    except Exception as e:
+        logger.warning(f"[GFS] GRIB parse failed: {e}")
+
+    return None
 
 
 def _fetch_noaa_gfs(date_str: str, hour: int, bbox: tuple) -> dict:
@@ -205,16 +419,16 @@ def _fetch_noaa_gfs(date_str: str, hour: int, bbox: tuple) -> dict:
                 "timestamp": np.array([f"{attempt_date}T{hour:02d}:00:00Z"]),
             }
         except Exception as e:
-            logger.info(f"[GFS] OPeNDAP attempt for {attempt_date} failed: {e}")
+            logger.info(f"[GFS] OPeNDAP attempt for offset {day_offset} failed: {e}")
             continue
 
     return None
 
 
-def _fetch_noaa_http(date_str: str, hour: int, bbox: tuple) -> dict:
+def _fetch_aws_s3(date_str: str, hour: int, bbox: tuple) -> dict:
     """
-    Fallback: Try fetching GFS data via simple HTTP/GRIB if OPeNDAP fails.
-    This uses the NOMADS filter service.
+    Fetch GFS data from AWS S3 public bucket (noaa-gfs-bdp-pds).
+    No AWS credentials required — bucket is publicly accessible.
     """
     try:
         import requests
@@ -223,25 +437,103 @@ def _fetch_noaa_http(date_str: str, hour: int, bbox: tuple) -> dict:
 
     min_lat, max_lat, min_lon, max_lon = bbox
 
-    # Try recent dates
     for day_offset in [0, -1, -2]:
         try:
             from datetime import datetime as dt
             base_date = dt.strptime(date_str, "%Y%m%d") + timedelta(days=day_offset)
             attempt_date = base_date.strftime("%Y%m%d")
 
-            # Use the NOMADS filter for a subset
-            url = (
-                f"https://nomads.ncep.noaa.gov/dods/gfs_0p25/gfs{attempt_date}/gfs_0p25_{hour:02d}z.info"
+            # AWS S3 public URL pattern
+            s3_url = (
+                f"https://noaa-gfs-bdp-pds.s3.amazonaws.com/"
+                f"gfs.{attempt_date}/{hour:02d}/atmos/"
+                f"gfs.t{hour:02d}z.pgrb2.0p25.f000"
             )
 
-            resp = requests.get(url, timeout=10)
-            if resp.status_code == 200:
-                logger.info(f"[GFS] NOAA HTTP: GFS data exists for {attempt_date}/{hour:02d}z")
-                # If info endpoint works, the OPeNDAP should also work
-                # but since we're here, OPeNDAP failed — just confirm data availability
-                return None
-        except Exception:
+            logger.info(f"[GFS] AWS S3: checking {attempt_date}/{hour:02d}z")
+
+            # Do a HEAD request first to check if file exists
+            head_resp = requests.head(s3_url, timeout=10)
+            if head_resp.status_code != 200:
+                logger.info(f"[GFS] AWS S3: file not found for {attempt_date}/{hour:02d}z (HTTP {head_resp.status_code})")
+                continue
+
+            file_size = int(head_resp.headers.get('content-length', 0))
+            logger.info(f"[GFS] AWS S3: file exists ({file_size / 1024 / 1024:.1f} MB)")
+
+            # The full file is large (300+ MB). We can't download it all.
+            # Use range requests if supported, otherwise skip to cfgrib with Herbie
+            # For now, try using the Herbie library if available
+            try:
+                from herbie import Herbie
+                h = Herbie(
+                    f"{attempt_date[:4]}-{attempt_date[4:6]}-{attempt_date[6:8]} {hour:02d}:00",
+                    model="gfs",
+                    product="pgrb2.0p25",
+                    fxx=0,
+                    verbose=False,
+                )
+
+                import xarray as xr
+
+                # Download temperature and RH for our levels
+                ds_t = h.xarray(":TMP:", remove_grib=False)
+                ds_rh = h.xarray(":RH:", remove_grib=False)
+                ds_u = h.xarray(":UGRD:", remove_grib=False)
+                ds_v = h.xarray(":VGRD:", remove_grib=False)
+
+                # Subset to bbox
+                lat_mask = (ds_t.latitude >= min_lat) & (ds_t.latitude <= max_lat)
+                lon_mask = (ds_t.longitude >= min_lon) & (ds_t.longitude <= max_lon)
+
+                ds_t_sub = ds_t.where(lat_mask & lon_mask, drop=True)
+
+                lats = ds_t_sub.latitude.values
+                lons = ds_t_sub.longitude.values
+                lons = np.where(lons > 180, lons - 360, lons)
+
+                temp_data = []
+                rh_data = []
+                u_data = []
+                v_data = []
+
+                for p_level in PRESSURE_LEVELS:
+                    temp_data.append(ds_t_sub.sel(isobaricInhPa=p_level, method='nearest')['t'].values)
+                    rh_data.append(ds_rh.where(lat_mask & lon_mask, drop=True).sel(isobaricInhPa=p_level, method='nearest')['r'].values)
+                    u_data.append(ds_u.where(lat_mask & lon_mask, drop=True).sel(isobaricInhPa=p_level, method='nearest')['u'].values)
+                    v_data.append(ds_v.where(lat_mask & lon_mask, drop=True).sel(isobaricInhPa=p_level, method='nearest')['v'].values)
+
+                from sac_engine import saturation_pressure_water, saturation_pressure_ice
+
+                temp_arr = np.array(temp_data)
+                rh_arr = np.array(rh_data)
+
+                e_w = saturation_pressure_water(temp_arr)
+                e_i = saturation_pressure_ice(temp_arr)
+                safe_e_i = np.where(e_i > 0, e_i, 1.0)
+                rhi = rh_arr * (e_w / safe_e_i)
+                issr_intensity = np.maximum(0.0, rhi - 100.0)
+
+                return {
+                    "lats": lats,
+                    "lons": lons,
+                    "pressure_levels": np.array(PRESSURE_LEVELS),
+                    "temperature": temp_arr,
+                    "rh": rh_arr,
+                    "u_wind": np.array(u_data),
+                    "v_wind": np.array(v_data),
+                    "issr_intensity": issr_intensity,
+                    "source": np.array(["noaa_live"]),
+                    "timestamp": np.array([f"{attempt_date}T{hour:02d}:00:00Z"]),
+                }
+
+            except ImportError:
+                logger.info("[GFS] Herbie not installed — cannot use AWS S3 GRIB download")
+            except Exception as e:
+                logger.info(f"[GFS] Herbie S3 access failed: {e}")
+
+        except Exception as e:
+            logger.info(f"[GFS] AWS S3 attempt for offset {day_offset} failed: {e}")
             continue
 
     return None
