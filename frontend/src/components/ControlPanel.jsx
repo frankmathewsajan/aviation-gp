@@ -55,7 +55,7 @@ function AirportInput({ label, icon, value, onChange, onSelect, geocode, placeho
     <div className="relative" ref={wrapperRef}>
       <button className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-stone-50 transition-colors rounded-lg group">
         <div className="flex items-center gap-3">
-          <span className="text-stone-400 text-lg">{icon}</span>
+          <span className="text-stone-400 text-base w-5 text-center">{icon}</span>
           <span className="text-sm font-medium text-stone-600">{label}</span>
         </div>
         <div className="flex items-center gap-2">
@@ -88,7 +88,7 @@ function AirportInput({ label, icon, value, onChange, onSelect, geocode, placeho
   );
 }
 
-export default function ControlPanel({ onOptimize, onWeightsChange, loading, geocode, gfsSource, onCollapse }) {
+export default function ControlPanel({ onOptimize, onWeightsChange, loading, geocode, gfsSource, onCollapse, useCache, onToggleCache }) {
   const [origin, setOrigin] = useState('JFK');
   const [destination, setDestination] = useState('LHR');
   const [aircraft, setAircraft] = useState('A320');
@@ -150,8 +150,8 @@ export default function ControlPanel({ onOptimize, onWeightsChange, loading, geo
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-1">
         {/* Airport inputs */}
-        <AirportInput label="Origin" icon="✈" value={origin} onChange={setOrigin} onSelect={setOrigin} geocode={geocode} placeholder="JFK" />
-        <AirportInput label="Destination" icon="📍" value={destination} onChange={setDestination} onSelect={setDestination} geocode={geocode} placeholder="LHR" />
+        <AirportInput label="Origin" icon={<i className="fa-solid fa-plane-departure" />} value={origin} onChange={setOrigin} onSelect={setOrigin} geocode={geocode} placeholder="JFK" />
+        <AirportInput label="Destination" icon={<i className="fa-solid fa-location-dot" />} value={destination} onChange={setDestination} onSelect={setDestination} geocode={geocode} placeholder="LHR" />
 
         <div className="px-4"><Separator className="my-1" /></div>
 
@@ -160,7 +160,7 @@ export default function ControlPanel({ onOptimize, onWeightsChange, loading, geo
           <button onClick={() => setShowAircraftMenu(v => !v)}
             className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-stone-50 transition-colors rounded-lg">
             <div className="flex items-center gap-3">
-              <span className="text-stone-400 text-lg">✈️</span>
+              <span className="text-stone-400 text-base w-5 text-center"><i className="fa-solid fa-plane" /></span>
               <span className="text-sm font-medium text-stone-600">Aircraft Type</span>
             </div>
             <div className="flex items-center gap-2">
@@ -189,7 +189,7 @@ export default function ControlPanel({ onOptimize, onWeightsChange, loading, geo
         {/* Departure */}
         <button className="w-full flex items-center justify-between px-4 py-3.5 hover:bg-stone-50 transition-colors rounded-lg">
           <div className="flex items-center gap-3">
-            <span className="text-stone-400 text-lg">🕐</span>
+            <span className="text-stone-400 text-base w-5 text-center"><i className="fa-regular fa-clock" /></span>
             <span className="text-sm font-medium text-stone-600">Departure</span>
           </div>
           <div className="flex items-center gap-2">
@@ -205,7 +205,7 @@ export default function ControlPanel({ onOptimize, onWeightsChange, loading, geo
         {/* NOAA toggle */}
         <div className="flex items-center justify-between px-4 py-3.5">
           <div className="flex items-center gap-3">
-            <span className="text-stone-400 text-lg">🛰️</span>
+            <span className="text-stone-400 text-base w-5 text-center"><i className="fa-solid fa-satellite" /></span>
             <div>
               <span className="text-sm font-medium text-stone-600">NOAA GFS Data</span>
               <p className="text-[10px] text-stone-400 mt-0.5">
@@ -214,6 +214,20 @@ export default function ControlPanel({ onOptimize, onWeightsChange, loading, geo
             </div>
           </div>
           <Switch checked={useNoaa} onCheckedChange={setUseNoaa} />
+        </div>
+
+        {/* Cache toggle */}
+        <div className="flex items-center justify-between px-4 py-3.5">
+          <div className="flex items-center gap-3">
+            <span className="text-stone-400 text-base w-5 text-center"><i className="fa-solid fa-database" /></span>
+            <div>
+              <span className="text-sm font-medium text-stone-600">Route Cache</span>
+              <p className="text-[10px] text-stone-400 mt-0.5">
+                {useCache ? 'Use cached results if available' : 'Force fresh optimization'}
+              </p>
+            </div>
+          </div>
+          <Switch checked={useCache} onCheckedChange={onToggleCache} />
         </div>
 
         <div className="px-4"><Separator className="my-1" /></div>
@@ -225,7 +239,7 @@ export default function ControlPanel({ onOptimize, onWeightsChange, loading, geo
           <div className="space-y-4">
             <div>
               <div className="flex justify-between items-center mb-2">
-                <Label className="text-xs text-stone-600 font-medium">🌿 Minimize CO₂</Label>
+                <Label className="text-xs text-stone-600 font-medium"><i className="fa-solid fa-leaf text-emerald-500 mr-1.5" /> Minimize CO₂</Label>
                 <span className="text-xs font-mono font-bold text-stone-800">{weights.co2}%</span>
               </div>
               <Slider value={[weights.co2]} max={100} step={1} onValueChange={(v) => handleWeightChange('co2', v)} />
@@ -233,7 +247,7 @@ export default function ControlPanel({ onOptimize, onWeightsChange, loading, geo
 
             <div>
               <div className="flex justify-between items-center mb-2">
-                <Label className="text-xs text-stone-600 font-medium">☁️ Minimize Contrails</Label>
+                <Label className="text-xs text-stone-600 font-medium"><i className="fa-solid fa-cloud text-sky-400 mr-1.5" /> Minimize Contrails</Label>
                 <span className="text-xs font-mono font-bold text-stone-800">{weights.contrail}%</span>
               </div>
               <Slider value={[weights.contrail]} max={100} step={1} onValueChange={(v) => handleWeightChange('contrail', v)} />
@@ -241,7 +255,7 @@ export default function ControlPanel({ onOptimize, onWeightsChange, loading, geo
 
             <div>
               <div className="flex justify-between items-center mb-2">
-                <Label className="text-xs text-stone-600 font-medium">⏱ Minimize Time</Label>
+                <Label className="text-xs text-stone-600 font-medium"><i className="fa-solid fa-stopwatch text-amber-500 mr-1.5" /> Minimize Time</Label>
                 <span className="text-xs font-mono font-bold text-stone-800">{weights.time}%</span>
               </div>
               <Slider value={[weights.time]} max={100} step={1} onValueChange={(v) => handleWeightChange('time', v)} />

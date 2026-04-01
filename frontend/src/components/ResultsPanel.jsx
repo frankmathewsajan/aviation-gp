@@ -1,8 +1,93 @@
+import { useRef, useEffect, useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import ParetoChart from './ParetoChart';
+
+const LOG_LEVEL_STYLES = {
+  info: { color: 'text-stone-500', icon: 'fa-solid fa-circle-info', iconColor: 'text-stone-400' },
+  warn: { color: 'text-amber-600', icon: 'fa-solid fa-triangle-exclamation', iconColor: 'text-amber-500' },
+  error: { color: 'text-red-600', icon: 'fa-solid fa-circle-xmark', iconColor: 'text-red-500' },
+  success: { color: 'text-emerald-600', icon: 'fa-solid fa-circle-check', iconColor: 'text-emerald-500' },
+};
+
+function OptimizerConsole({ logs, loading, gfsSource }) {
+  const scrollRef = useRef(null);
+  const [expanded, setExpanded] = useState(true);
+
+  // Auto-scroll to bottom when new logs arrive
+  useEffect(() => {
+    if (scrollRef.current && expanded) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [logs, expanded]);
+
+  const hasLogs = logs && logs.length > 0;
+
+  if (!hasLogs && !loading) return null;
+
+  return (
+    <div className="mt-3">
+      <button
+        onClick={() => setExpanded(prev => !prev)}
+        className="w-full flex items-center justify-between text-[10px] font-semibold text-stone-400 uppercase tracking-widest mb-2 hover:text-stone-600 transition-colors cursor-pointer"
+      >
+        <span>
+          <i className="fa-solid fa-terminal mr-1.5" />
+          Optimizer Console
+          {loading && (
+            <span className="ml-2 text-sky-500 normal-case tracking-normal font-mono text-[9px]">
+              <i className="fa-solid fa-circle animate-pulse mr-1" />running
+            </span>
+          )}
+        </span>
+        <i className={`fa-solid fa-chevron-${expanded ? 'up' : 'down'} text-[8px]`} />
+      </button>
+
+      {/* Synthetic fallback banner */}
+      {gfsSource && gfsSource !== 'noaa_live' && (
+        <div className="flex items-start gap-2 px-3 py-2 mb-2 bg-amber-50 border border-amber-200/60 rounded-lg">
+          <i className="fa-solid fa-triangle-exclamation text-amber-500 text-xs mt-0.5 shrink-0" />
+          <div className="text-[10px] text-amber-700 leading-relaxed">
+            <span className="font-semibold">Synthetic Fallback Active</span> — NOAA GFS data was unavailable.
+            Results use a synthetic atmosphere model and may be less accurate.
+          </div>
+        </div>
+      )}
+
+      {expanded && (
+        <div
+          ref={scrollRef}
+          className="bg-stone-950 rounded-xl p-3 max-h-[200px] overflow-y-auto font-mono text-[10px] leading-relaxed custom-scrollbar"
+        >
+          {(!hasLogs && loading) && (
+            <div className="text-stone-500 flex items-center gap-2">
+              <span className="w-3 h-3 border border-stone-600 border-t-stone-300 rounded-full animate-spin" />
+              Initializing optimizer...
+            </div>
+          )}
+          {hasLogs && logs.map((entry, i) => {
+            const style = LOG_LEVEL_STYLES[entry.level] || LOG_LEVEL_STYLES.info;
+            return (
+              <div key={i} className={`flex items-start gap-1.5 ${style.color} py-[1px]`}>
+                <span className="text-stone-600 shrink-0 select-none w-[52px]">{entry.timestamp}</span>
+                <i className={`${style.icon} ${style.iconColor} text-[8px] mt-[3px] shrink-0 w-3`} />
+                <span className="break-all">{entry.msg}</span>
+              </div>
+            );
+          })}
+          {loading && hasLogs && (
+            <div className="flex items-center gap-2 text-sky-400 mt-1 pt-1 border-t border-stone-800/50">
+              <span className="w-3 h-3 border border-sky-800 border-t-sky-400 rounded-full animate-spin" />
+              <span>Awaiting server...</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function ResultsOverlay({
   results,
@@ -13,14 +98,36 @@ export default function ResultsOverlay({
   onSelectParetoPoint,
   selectedPathId,
   onCollapse,
+  logs,
+  loading,
 }) {
-  if (!results) return null;
+  // During loading with no results yet, show just the console
+  if (!results) {
+    if (!loading && (!logs || logs.length === 0)) return null;
+    return (
+      <div className="fixed right-3 top-3 bottom-3 w-[320px] z-[999] bg-white/90 backdrop-blur-xl rounded-2xl border border-stone-200/60 shadow-xl flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-5 pt-4 pb-2">
+          <h2 className="text-xs font-semibold text-stone-400 uppercase tracking-widest">
+            <i className="fa-solid fa-terminal mr-1.5" />Optimizer
+          </h2>
+          <button onClick={onCollapse} className="w-7 h-7 rounded-full border border-stone-200 flex items-center justify-center hover:bg-stone-50 transition-colors cursor-pointer">
+            <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" className="text-stone-400">
+              <path d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 pb-5">
+          <OptimizerConsole logs={logs} loading={loading} gfsSource={null} />
+        </div>
+      </div>
+    );
+  }
 
   const { stats, pareto_front } = results;
 
   return (
     <>
-      {/* Floating Stats Card — bottom center of map (matching demo) */}
+      {/* Floating Stats Card — bottom center of map */}
       <div className="fixed bottom-16 left-1/2 -translate-x-1/2 z-[998]">
         <Card className="bg-white/90 backdrop-blur-xl shadow-lg border-stone-200/50">
           <CardContent className="flex items-end gap-8 px-6 py-4">
@@ -104,13 +211,13 @@ export default function ResultsOverlay({
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <Label className="text-xs text-stone-600 font-medium flex items-center gap-2">
-                <span>🛰️</span>NOAA Data Overlay
+                <i className="fa-solid fa-satellite text-sky-500" />NOAA Data Overlay
               </Label>
               <Switch checked={showNoaaOverlay} onCheckedChange={onToggleNoaa} />
             </div>
             <div className="flex items-center justify-between">
               <Label className="text-xs text-stone-600 font-medium flex items-center gap-2">
-                <span>📊</span>Altitude Profile
+                <i className="fa-solid fa-chart-simple text-stone-500" />Altitude Profile
               </Label>
               <Switch checked={showAltitude} onCheckedChange={onToggleAltitude} />
             </div>
@@ -137,6 +244,11 @@ export default function ResultsOverlay({
               </svg>
             </div>
           )}
+
+          <Separator className="my-3" />
+
+          {/* Optimizer Console */}
+          <OptimizerConsole logs={logs} loading={loading} gfsSource={results.gfs_source} />
         </div>
       </div>
     </>

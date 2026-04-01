@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import MapView from './components/MapView';
 import ControlPanel from './components/ControlPanel';
 import ResultsOverlay from './components/ResultsPanel';
@@ -15,6 +15,20 @@ function App() {
   const [showAltitude, setShowAltitude] = useState(false);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [useCache, setUseCache] = useState(true);
+
+  // Auto-open right panel when results arrive
+  useEffect(() => {
+    if (results) {
+      setRightCollapsed(false);
+    }
+  }, [results]);
+
+  const handleOptimize = useCallback((params) => {
+    // Auto-open right panel to show logs
+    setRightCollapsed(false);
+    optimize({ ...params, useCache });
+  }, [optimize, useCache]);
 
   const handleWeightsChange = useCallback((weights) => {
     if (results) {
@@ -25,18 +39,20 @@ function App() {
   return (
     <div className="relative w-full h-full flex bg-stone-50">
       {/* Map — fills entire background */}
-      <MapView results={results} showNoaaOverlay={showNoaaOverlay} />
+      <MapView results={results} showNoaaOverlay={showNoaaOverlay} leftCollapsed={leftCollapsed} />
 
       {/* Left sidebar — collapsible */}
       <div className={`fixed top-0 left-0 bottom-0 z-[999] flex items-stretch transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${leftCollapsed ? 'w-10' : ''}`}>
         {!leftCollapsed && (
           <ControlPanel
-            onOptimize={optimize}
+            onOptimize={handleOptimize}
             onWeightsChange={handleWeightsChange}
             loading={loading}
             geocode={geocode}
             gfsSource={results?.gfs_source}
             onCollapse={() => setLeftCollapsed(true)}
+            useCache={useCache}
+            onToggleCache={setUseCache}
           />
         )}
         {leftCollapsed && (
@@ -52,7 +68,7 @@ function App() {
       </div>
 
       {/* Results overlay — floating on map */}
-      {results && !rightCollapsed && (
+      {(results || loading) && !rightCollapsed && (
         <ResultsOverlay
           results={results}
           showNoaaOverlay={showNoaaOverlay}
@@ -62,6 +78,8 @@ function App() {
           onSelectParetoPoint={selectParetoPoint}
           selectedPathId={selectedPathId}
           onCollapse={() => setRightCollapsed(true)}
+          logs={logs}
+          loading={loading}
         />
       )}
 
@@ -93,7 +111,7 @@ function App() {
       {/* Error */}
       {error && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[1000] flex items-center gap-2 px-5 py-3 bg-red-50 rounded-full border border-red-200 text-red-600 text-sm font-medium">
-          <span>⚠</span>
+          <i className="fa-solid fa-triangle-exclamation" />
           <span>{error}</span>
         </div>
       )}

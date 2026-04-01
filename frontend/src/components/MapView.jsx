@@ -20,6 +20,41 @@ function FitBounds({ bounds }) {
   return null;
 }
 
+function DynamicZoomControl({ leftCollapsed }) {
+  const map = useMap();
+  const controlRef = useRef(null);
+
+  useEffect(() => {
+    // Create a custom zoom control in a container we can position
+    if (!controlRef.current) {
+      controlRef.current = L.control.zoom({ position: 'topleft' });
+      controlRef.current.addTo(map);
+    }
+
+    // Get the control container and apply dynamic left offset
+    const container = controlRef.current.getContainer();
+    if (container) {
+      container.style.transition = 'margin-left 0.5s cubic-bezier(0.16, 1, 0.3, 1)';
+      container.style.marginLeft = leftCollapsed ? '60px' : '350px';
+      container.style.marginTop = '12px';
+    }
+
+    return () => {};
+  }, [leftCollapsed, map]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (controlRef.current) {
+        controlRef.current.remove();
+        controlRef.current = null;
+      }
+    };
+  }, [map]);
+
+  return null;
+}
+
 function NOAAOverlay({ points, visible }) {
   const map = useMap();
   const canvasLayerRef = useRef(null);
@@ -93,7 +128,7 @@ function AircraftAnimation({ path }) {
   useEffect(() => {
     if (!path || path.length < 2) return;
     if (markerRef.current) map.removeLayer(markerRef.current);
-    const icon = L.divIcon({ className: 'aircraft-marker', html: '<div class="aircraft-marker-icon">✈</div>', iconSize: [24, 24], iconAnchor: [12, 12] });
+    const icon = L.divIcon({ className: 'aircraft-marker', html: '<div class="aircraft-marker-icon"><i class="fa-solid fa-plane"></i></div>', iconSize: [24, 24], iconAnchor: [12, 12] });
     markerRef.current = L.marker([path[0].lat, path[0].lon], { icon, zIndexOffset: 1000 }).addTo(map);
     let idx = 0;
     const animate = () => {
@@ -116,7 +151,7 @@ function AircraftAnimation({ path }) {
   return null;
 }
 
-export default function MapView({ results, showNoaaOverlay }) {
+export default function MapView({ results, showNoaaOverlay, leftCollapsed }) {
   const bounds = useMemo(() => {
     if (!results) return null;
     const allPoints = [...(results.selected_path || []), ...(results.baseline_path || [])];
@@ -152,7 +187,9 @@ export default function MapView({ results, showNoaaOverlay }) {
 
   return (
     <div className="flex-1 h-full relative">
-      <MapContainer center={[35, -20]} zoom={3} zoomControl={true} style={{ height: '100%', width: '100%' }}>
+      <MapContainer center={[35, -20]} zoom={3} zoomControl={false} style={{ height: '100%', width: '100%' }}>
+        {/* Dynamic zoom control */}
+        <DynamicZoomControl leftCollapsed={leftCollapsed} />
         {/* Light map tiles — CartoDB Positron */}
         <TileLayer
           url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
@@ -204,7 +241,7 @@ export default function MapView({ results, showNoaaOverlay }) {
       {/* NOAA legend */}
       {showNoaaOverlay && results && (
         <div className="absolute bottom-20 right-[340px] z-[998] bg-white/90 backdrop-blur-lg rounded-xl shadow-md border border-stone-200/50 px-3 py-2.5">
-          <div className="text-[9px] font-bold text-stone-400 uppercase tracking-wider mb-1.5">🛰️ ISSR Intensity</div>
+          <div className="text-[9px] font-bold text-stone-400 uppercase tracking-wider mb-1.5"><i className="fa-solid fa-satellite mr-1" /> ISSR Intensity</div>
           {[['bg-emerald-400/50', 'Low'], ['bg-amber-400/50', 'Moderate'], ['bg-red-400/50', 'High'], ['bg-pink-700/50', 'Severe']].map(([bg, label]) => (
             <div key={label} className="flex items-center gap-2 text-[10px] text-stone-500 mb-0.5">
               <div className={`w-3 h-2 rounded-sm ${bg}`} />
